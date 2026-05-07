@@ -8308,48 +8308,68 @@ function between(n, min, max) { return n >= min && n <= max; }
 function allBetween(stats, min, max) { return between(stats.wealth, min, max) && between(stats.health, min, max) && between(stats.mission, min, max) && between(stats.relationship, min, max); }
 function evaluateEnding(state) {
   const s = state.stats;
+  const f = state.flags || {};
   const zeroId = checkZeroEnding(s);
   if (zeroId) return finalizeEnding(state, zeroId);
-  if (state.flags.caught) return finalizeEnding(state, 'H05');
+  if (f.caught) return finalizeEnding(state, 'H05');
 
   const total = s.wealth + s.health + s.mission + s.relationship;
   const avg = total / 4;
+  const maxStat = Math.max(s.wealth, s.health, s.mission, s.relationship);
+  const minStat = Math.min(s.wealth, s.health, s.mission, s.relationship);
+  const spread = maxStat - minStat;
   const has = (tags) => hasAnyTag(state, tags);
+  const candidates = [];
+  const add = (id, score, condition) => {
+    if (condition) candidates.push({ id, score });
+  };
 
-  // 特殊/隐藏优先：只要路线条件足够明确，就不再被普通高财富/平均结局挤掉。
-  if (state.flags.startupPitySuccess && state.careerTag === '创业') return finalizeEnding(state, 'E13');
-  if (state.careerTag === '体制' && state.flags.everIllegal && s.wealth >= 62 && s.relationship >= 62 && s.mission <= 58) return finalizeEnding(state, 'E17');
-  if (state.careerTag === '体制' && !state.flags.everIllegal && !state.flags.everGrey && s.mission >= 60 && s.relationship >= 58 && between(s.wealth, 38, 96)) return finalizeEnding(state, 'E18');
-  if (state.majorTag === '艺术' && state.careerTag === '创业' && (s.mission >= 58 || has(['游戏', '创作', '独立']))) return finalizeEnding(state, 'H01');
-  if ((state.majorTag === 'AI' || state.majorTag === '工科') && s.mission >= 60 && (s.wealth >= 58 || has(['公益', '开源', '教育', '公共服务']))) return finalizeEnding(state, 'H02');
-  if (state.majorTag === '工科' && s.mission >= 56 && (s.health <= 70 || has(['重大工程', '关键领域', '工程', '去关键岗位']))) return finalizeEnding(state, 'H03');
-  if ((state.flags.hadNearZero || state.flags.hasRecovery) && s.wealth >= 58 && s.health >= 58 && s.mission >= 58 && s.relationship >= 58) return finalizeEnding(state, 'H04');
+  // v3 平衡版：先保留硬触发，再用“候选结局打分”防止 E01/E14/E15 这类泛结局截胡。
+  // 分数越高越优先；职业线、家庭线、创业线、体制线、隐藏线都高于普通均衡线。
+  add('E13', 130, f.startupPitySuccess && state.careerTag === '创业');
+  add('E17', 128, state.careerTag === '体制' && f.everIllegal && s.wealth >= 58 && s.relationship >= 58 && s.mission <= 64);
+  add('E18', 127, state.careerTag === '体制' && !f.everIllegal && !f.everGrey && s.mission >= 58 && s.relationship >= 56 && between(s.wealth, 35, 98));
+  add('H05', 126, f.caught);
+  add('H04', 124, (f.hadNearZero || f.hasRecovery) && s.wealth >= 55 && s.health >= 55 && s.mission >= 55 && s.relationship >= 55);
+  add('H01', 123, state.majorTag === '艺术' && state.careerTag === '创业' && (s.mission >= 52 || has(['游戏', '创作', '独立', '审美'])));
+  add('H02', 122, (state.majorTag === 'AI' || state.majorTag === '工科') && s.mission >= 56 && (s.wealth >= 52 || has(['公益', '开源', '教育', '公共服务'])));
+  add('H03', 123, state.majorTag === '工科' && s.mission >= 52 && (s.health <= 74 || has(['重大工程', '关键领域', '工程', '去关键岗位'])));
 
-  // 强特征结局：先看玩家实际路线和标签，再看数值。
-  if (s.wealth >= 64 && s.health >= 54 && s.mission >= 56 && s.relationship >= 56) return finalizeEnding(state, 'E01');
-  if ((state.majorTag === 'AI' || state.majorTag === '工科') && s.mission >= 58 && s.wealth >= 50 && s.health <= 78) return finalizeEnding(state, 'E02');
-  if (s.wealth >= 76 && s.mission <= 58) return finalizeEnding(state, 'E03');
-  if (s.wealth >= 72 && s.relationship <= 64 && s.mission <= 68) return finalizeEnding(state, 'E04');
-  if (s.wealth >= 68 && s.mission >= 50 && s.relationship <= 62) return finalizeEnding(state, 'E05');
-  if (s.wealth >= 64 && s.health <= 52) return finalizeEnding(state, 'E06');
-  if (s.mission >= 60 && s.wealth <= 70 && s.relationship >= 42) return finalizeEnding(state, 'E07');
-  if ((state.careerTag === '体制' || has(['社区', '基层', '乡建', '公共服务', '教育','为民办事'])) && s.mission + s.relationship >= 108) return finalizeEnding(state, 'E08');
-  if (state.majorTag === 'AI' && s.relationship <= 68) return finalizeEnding(state, 'E09');
-  if (['保研', '考研', '留学'].includes(state.gradTag) && (s.mission >= 52 || has(['科研', '实验室', '论文', '研究者']))) return finalizeEnding(state, 'E10');
-  if (state.careerTag === '大厂' && s.wealth >= 54) return finalizeEnding(state, 'E11');
-  if ((state.flags.marriedBranch || has(['已婚', '家庭线', '伴侣', '育儿线'])) && s.relationship >= 48 && !has(['离婚', '离婚已发生', '名存实亡'])) return finalizeEnding(state, 'E12');
-  if (state.careerTag === '创业' && (state.flags.startupAttempts >= 1 || has(['创业起飞赌局', '创业重启', '二次创业', '创业增长', '估值起飞', '创业现金流正','现金流修复'])) && s.wealth >= 35) return finalizeEnding(state, 'E13');
-  if (s.health >= 52 && s.relationship >= 48 && s.wealth < 78 && s.mission < 72) return finalizeEnding(state, 'E14');
-  if (s.wealth <= 48 && s.health <= 50 && s.mission <= 50 && s.relationship <= 50) return finalizeEnding(state, 'E16');
-  if (allBetween(s, 40, 82)) return finalizeEnding(state, 'E15');
+  // 路线型普通结局优先，保证大厂、科研、家庭、创业、基层等不会被“人生赢家/普通人”吞掉。
+  add('E12', 112, (f.marriedBranch || has(['已婚', '家庭线', '伴侣', '育儿线'])) && s.relationship >= 42 && !has(['离婚', '离婚已发生', '名存实亡']));
+  add('E13', 111, state.careerTag === '创业' && (f.startupAttempts >= 1 || has(['创业起飞赌局', '创业重启', '二次创业', '创业增长', '估值起飞', '创业现金流正', '现金流修复'])) && s.wealth >= 30);
+  add('E11', 110, state.careerTag === '大厂' && s.wealth >= 50);
+  add('E10', 109, ['保研', '考研', '留学'].includes(state.gradTag) && (s.mission >= 48 || has(['科研', '实验室', '论文', '研究者'])));
+  add('E08', 108, (state.careerTag === '体制' || has(['社区', '基层', '乡建', '公共服务', '教育', '为民办事'])) && (s.mission + s.relationship >= 98));
+  add('E09', 107, state.majorTag === 'AI' && s.relationship <= 72);
+  add('E02', 106, (state.majorTag === 'AI' || state.majorTag === '工科') && s.mission >= 52 && s.wealth >= 45 && s.health <= 88);
 
-  // 兜底按最突出的“人格痕迹”分配，避免永远只落 E04/E07/E15。
-  const lowest = Object.entries(s).sort((a,b)=>a[1]-b[1])[0][0];
-  const highest = Object.entries(s).sort((a,b)=>b[1]-a[1])[0][0];
+  // 强特征数值结局。
+  add('E03', 103, s.wealth >= 74 && s.mission <= 60);
+  add('E04', 102, s.wealth >= 70 && s.relationship <= 66 && s.mission <= 70);
+  add('E05', 101, s.wealth >= 64 && s.mission >= 46 && s.relationship <= 64);
+  add('E06', 100, s.wealth >= 60 && s.health <= 56);
+  add('E07', 99, s.mission >= 58 && s.wealth <= 74 && s.relationship >= 38);
+
+  // 泛结局最后判：门槛收紧，避免抢走路线结局。
+  add('E01', 92, s.wealth >= 76 && s.health >= 66 && s.mission >= 66 && s.relationship >= 66);
+  add('E16', 91, avg <= 48 || (s.wealth <= 50 && s.health <= 52 && s.mission <= 52 && s.relationship <= 52));
+  add('E14', 88, s.health >= 52 && s.relationship >= 48 && s.wealth < 78 && s.mission < 72 && avg >= 48 && (s.mission < 52 || s.wealth > 65 || (s.health - s.mission) >= 8 || (s.relationship - s.mission) >= 8));
+  add('E15', 82, allBetween(s, 38, 84) && spread <= 42);
+
+  if (candidates.length) {
+    const priority = ['E13','E17','E18','H05','H04','H01','H02','H03','E12','E11','E10','E08','E09','E02','E03','E04','E05','E06','E07','E01','E16','E14','E15'];
+    candidates.sort((a, b) => (b.score - a.score) || (priority.indexOf(a.id) - priority.indexOf(b.id)));
+    return finalizeEnding(state, candidates[0].id);
+  }
+
+  // 最终兜底：按最低项/最高项分配，保证永远有结局，也避免所有普通局都掉到 E15。
+  const lowest = Object.entries(s).sort((a, b) => a[1] - b[1])[0][0];
+  const highest = Object.entries(s).sort((a, b) => b[1] - a[1])[0][0];
   if (avg < 45) return finalizeEnding(state, 'E16');
-  if (lowest === 'health') return finalizeEnding(state, s.wealth >= 66 ? 'E06' : 'Z01');
+  if (lowest === 'health') return finalizeEnding(state, s.wealth >= 62 ? 'E06' : 'Z01');
   if (lowest === 'relationship') return finalizeEnding(state, state.majorTag === 'AI' ? 'E09' : 'E05');
-  if (lowest === 'mission' && s.wealth >= 70) return finalizeEnding(state, 'E03');
+  if (lowest === 'mission' && s.wealth >= 66) return finalizeEnding(state, 'E03');
   if (highest === 'mission') return finalizeEnding(state, 'E07');
   if (highest === 'wealth') return finalizeEnding(state, 'E04');
   return finalizeEnding(state, 'E15');
@@ -8398,14 +8418,9 @@ const CLOUD_HTTP_BASE='https://636c-cloud1-d0geyskxbd94d1619-1423728045.tcb.qclo
 // ===== Supabase 云同步配置 =====
 // 上传 GitHub 前，把下面两项改成你自己的 Supabase Project URL 和 anon key。
 // 只放 anon / publishable key，不要放 service_role key。
-const SUPABASE_CONFIG_KEY = 'loti_supabase_config_v3';
-
-// 这里一定要用 Supabase 后台 Project Settings → API 里复制的 Project URL
-const DEFAULT_SUPABASE_URL = 'https://gprhousljuonstjopct.supabase.co';
-
-// 这里填 anon / publishable key，不要填 service_role key
-const DEFAULT_SUPABASE_ANON_KEY = 'sb_publishable_jGgEqtk9vGVkjTe5fhf2KA_uPXcOMRL';
-
+const SUPABASE_CONFIG_KEY = 'loti_supabase_config_v4_forced';
+const DEFAULT_SUPABASE_URL = 'https://gprhouosljuonstjopct.supabase.co'; // 强制云同步：所有用户默认写入这个 Supabase 项目
+const DEFAULT_SUPABASE_ANON_KEY = 'sb_publishable_jGgEqtk9vGVkjTe5fhf2KA_uPXcOMRL'; // 只能填 anon / publishable key，不要填 service_role
 let SUPABASE_URL = DEFAULT_SUPABASE_URL;
 let SUPABASE_ANON_KEY = DEFAULT_SUPABASE_ANON_KEY;
 let SUPABASE_ENABLED = false;
@@ -8422,23 +8437,16 @@ let syncInFlight = false;
 let lastSyncAt = 0;
 
 function getSupabaseConfig(){
-  try {
-    const saved = JSON.parse(localStorage.getItem(SUPABASE_CONFIG_KEY) || '{}');
-    return {
-      url: saved.url || DEFAULT_SUPABASE_URL || '',
-      anonKey: saved.anonKey || DEFAULT_SUPABASE_ANON_KEY || ''
-    };
-  } catch(e){
-    return { url: DEFAULT_SUPABASE_URL || '', anonKey: DEFAULT_SUPABASE_ANON_KEY || '' };
-  }
+  // 强制云同步版：不再依赖每台设备的本地配置，手机/电脑/他人浏览器都会使用同一套默认 Supabase。
+  return { url: DEFAULT_SUPABASE_URL, anonKey: DEFAULT_SUPABASE_ANON_KEY };
 }
 function refreshSupabaseClient(){
   const cfg = getSupabaseConfig();
   SUPABASE_URL = (cfg.url || '').trim();
   SUPABASE_ANON_KEY = (cfg.anonKey || '').trim();
-  SUPABASE_ENABLED = SUPABASE_URL.startsWith('https://') && SUPABASE_ANON_KEY.length > 20;
+  SUPABASE_ENABLED = SUPABASE_URL.startsWith('https://') && SUPABASE_ANON_KEY.length > 20 && !!(window.supabase && window.supabase.createClient);
   sb = SUPABASE_ENABLED ? window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY) : null;
-  cloudStatus = SUPABASE_ENABLED ? 'Supabase 已配置，等待同步/登录。' : 'Supabase 未配置：请在后台填写 Project URL 和 anon key，然后保存连接。';
+  cloudStatus = SUPABASE_ENABLED ? 'Supabase 强制云同步已开启，所有玩家数据会写入 sessions_latest。' : 'Supabase SDK 或配置异常：请检查网络、URL、publishable key。';
   return SUPABASE_ENABLED;
 }
 refreshSupabaseClient();
@@ -8502,7 +8510,7 @@ function buildSupabasePayload(st, eventType){
     route_key: st.routeKey || '',
     relationship_route: st.relationshipRoute || (flags.marriedBranch ? '已婚/家庭线' : (flags.soloBranch ? '独处/搭子线' : '未记录')),
     child_route: st.childRoute || (hasAnyTagForSync(st, ['有娃计划','育儿线','孩子兴趣']) ? '有子女/育儿线' : '未明确'),
-parenting_route: st.parentingRoute || (hasAnyTagForSync(st, ['控制型家长','尊重兴趣','育儿线']) ? '已进入育儿议题' : '未记录'),
+    parenting_route: st.parentingRoute || (hasAnyTagForSync(st, ['控制型家长','尊重兴趣','育儿线']) ? '已进入育儿议题' : '未记录'),
     illegal_count: flags.illegalChoiceCount || st.illegalCount || 0,
     grey_count: flags.everGrey ? Math.max(st.greyCount || 0, 1) : (st.greyCount || 0),
     stats: safeClone(st.stats, {}),
@@ -8546,17 +8554,15 @@ async function syncStateToSupabase(st, eventType){
   }
 }
 function saveSupabaseSettings(){
-  const url = ($('supabaseUrl') && $('supabaseUrl').value || '').trim();
-  const anonKey = ($('supabaseAnonKey') && $('supabaseAnonKey').value || '').trim();
-  localStorage.setItem(SUPABASE_CONFIG_KEY, JSON.stringify({ url, anonKey }));
+  localStorage.setItem(SUPABASE_CONFIG_KEY, JSON.stringify({ url: DEFAULT_SUPABASE_URL, anonKey: DEFAULT_SUPABASE_ANON_KEY }));
   refreshSupabaseClient();
-  alert(SUPABASE_ENABLED ? 'Supabase 配置已保存。现在可以重新玩一局测试同步。' : '已保存，但 URL/key 看起来还不完整。');
+  alert(SUPABASE_ENABLED ? '云同步已强制开启：所有用户都会写入同一个 Supabase。' : 'Supabase 配置异常，请检查 URL/key。');
   render();
 }
 function clearSupabaseSettings(){
-  if(!confirm('确认清空 Supabase 配置吗？')) return;
-  localStorage.removeItem(SUPABASE_CONFIG_KEY);
+  localStorage.setItem(SUPABASE_CONFIG_KEY, JSON.stringify({ url: DEFAULT_SUPABASE_URL, anonKey: DEFAULT_SUPABASE_ANON_KEY }));
   refreshSupabaseClient();
+  alert('已恢复强制云同步默认配置。');
   render();
 }
 async function adminLoginSupabase(){
@@ -8798,8 +8804,8 @@ function renderAdmin(){
     <h2>Supabase 云后台</h2>
     <p class="meta">${escapeHtml(cloudStatus)}<br>现在使用 <b>sessions_latest</b> 一局一行，后台读取不再拉取海量事件，因此不卡顿；session_events 只保留少量采样事件。</p>
     <div class="admin-login" style="margin:12px 0;max-width:none">
-      <input id="supabaseUrl" placeholder="Supabase Project URL，例如 https://xxxx.supabase.co" value="${escapeHtml(cfg.url || '')}">
-      <input id="supabaseAnonKey" placeholder="Supabase anon / publishable key，不要填 service_role" value="${escapeHtml(cfg.anonKey || '')}">
+      <input id="supabaseUrl" readonly placeholder="Supabase Project URL" value="${escapeHtml(cfg.url || '')}">
+      <input id="supabaseAnonKey" readonly placeholder="Supabase anon / publishable key" value="${escapeHtml(cfg.anonKey || '')}">
       <div class="actions"><button onclick="saveSupabaseSettings()">保存 Supabase 配置</button><button class="ghost" onclick="clearSupabaseSettings()">清空配置</button></div>
       <input id="adminEmail" placeholder="Supabase 管理员邮箱" autocomplete="username">
       <input id="adminPassword" placeholder="Supabase 管理员密码" type="password" autocomplete="current-password">

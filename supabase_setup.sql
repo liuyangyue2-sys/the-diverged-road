@@ -1,6 +1,6 @@
--- Supabase setup for 《人生算法：抉择之书》 H5 云同步版 v2
+-- Supabase setup for 《人生算法：抉择之书》 H5 云同步版 v3 强制云同步
 -- 在 Supabase Dashboard → SQL Editor 中整段执行。
--- 重点变化：sessions_latest 一局一行，后台读取更快；session_events 只做少量事件采样。
+-- 主表：sessions_latest；事件采样表：session_events；管理员表：admin_users。
 
 create table if not exists public.sessions_latest (
   session_id text primary key,
@@ -54,25 +54,25 @@ alter table public.sessions_latest enable row level security;
 alter table public.session_events enable row level security;
 alter table public.admin_users enable row level security;
 
--- 普通玩家：允许匿名写入/更新自己的最新快照。
--- 这是静态 GitHub Pages 的简化方案；正式生产可改成 Edge Function 中转。
 drop policy if exists "anon can insert latest sessions" on public.sessions_latest;
-create policy "anon can insert latest sessions"
+drop policy if exists "anon can update latest sessions" on public.sessions_latest;
+drop policy if exists "anon can upsert latest sessions insert" on public.sessions_latest;
+drop policy if exists "anon can upsert latest sessions update" on public.sessions_latest;
+drop policy if exists "admins can read latest sessions" on public.sessions_latest;
+
+create policy "anon can upsert latest sessions insert"
 on public.sessions_latest
 for insert
 to anon, authenticated
 with check (true);
 
-drop policy if exists "anon can update latest sessions" on public.sessions_latest;
-create policy "anon can update latest sessions"
+create policy "anon can upsert latest sessions update"
 on public.sessions_latest
 for update
 to anon, authenticated
 using (true)
 with check (true);
 
--- 管理员登录后才能读取全部玩家数据。
-drop policy if exists "admins can read latest sessions" on public.sessions_latest;
 create policy "admins can read latest sessions"
 on public.sessions_latest
 for select
@@ -84,15 +84,16 @@ using (
   )
 );
 
--- 事件采样表：匿名可插入，管理员可读。
 drop policy if exists "anon and auth can insert session events" on public.session_events;
+drop policy if exists "anon can insert session events" on public.session_events;
+drop policy if exists "admins can read session events" on public.session_events;
+
 create policy "anon and auth can insert session events"
 on public.session_events
 for insert
 to anon, authenticated
 with check (true);
 
-drop policy if exists "admins can read session events" on public.session_events;
 create policy "admins can read session events"
 on public.session_events
 for select
@@ -104,8 +105,9 @@ using (
   )
 );
 
--- 管理员身份表：管理员只能读自己的记录。
 drop policy if exists "admins can read own admin row" on public.admin_users;
+drop policy if exists "admins can read admin users" on public.admin_users;
+
 create policy "admins can read own admin row"
 on public.admin_users
 for select

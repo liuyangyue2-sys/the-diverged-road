@@ -33,3 +33,12 @@ on conflict (user_id) do update set note = excluded.note;
 - 使命、人际负值略微收敛，保留代价但不至于过早锁死结局。
 - 结局判定从纯高阈值改成“路线优先 + 数值特征 + 兜底分配”。
 - 已用 5000 局随机模拟检查，普通/隐藏/归零大多数可自然出现；另用定向状态测试确认 27 个结局判定条件均可命中。
+
+
+## v3 更新
+
+- Supabase 已强制云同步：Project URL 与 publishable key 已写入 index.html / loti_final.html。
+- 修复移动端因本地配置为空导致不同步的问题：不再依赖 localStorage 配置。
+- 修复同步 payload 中标签判断导致写入失败的问题。
+- 结局判定改为候选打分制，防止 E01/E14/E15 过度截胡路线结局。
+- 主要数据表是 `sessions_latest`，后台统计也读取这张表。
