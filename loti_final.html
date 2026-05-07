@@ -8399,10 +8399,15 @@ const CLOUD_HTTP_BASE='https://636c-cloud1-d0geyskxbd94d1619-1423728045.tcb.qclo
 // 上传 GitHub 前，把下面两项改成你自己的 Supabase Project URL 和 anon key。
 // 只放 anon / publishable key，不要放 service_role key。
 const SUPABASE_CONFIG_KEY = 'loti_supabase_config_v3';
-const DEFAULT_SUPABASE_URL = 'https://gprhouosljuonstjopct.supabase.co'; // 可留空，后台页面可直接填写保存
-const DEFAULT_SUPABASE_ANON_KEY = 'sb_publishable_jGgEqtk9vGVkjTe5fhf2KA_uPXcOMRL'; // 只能填 anon / publishable key，不要填 service_role
-let SUPABASE_URL = '';
-let SUPABASE_ANON_KEY = '';
+
+// 这里一定要用 Supabase 后台 Project Settings → API 里复制的 Project URL
+const DEFAULT_SUPABASE_URL = 'https://gprhousljuonstjopct.supabase.co';
+
+// 这里填 anon / publishable key，不要填 service_role key
+const DEFAULT_SUPABASE_ANON_KEY = 'sb_publishable_jGgEqtk9vGVkjTe5fhf2KA_uPXcOMRL';
+
+let SUPABASE_URL = DEFAULT_SUPABASE_URL;
+let SUPABASE_ANON_KEY = DEFAULT_SUPABASE_ANON_KEY;
 let SUPABASE_ENABLED = false;
 let sb = null;
 
@@ -8478,6 +8483,10 @@ function safeClone(value, fallback){
   try { return JSON.parse(JSON.stringify(value || fallback)); }
   catch(e){ return fallback; }
 }
+function hasAnyTagForSync(st, tags) {
+  const list = Array.isArray(st && st.tags) ? st.tags : [];
+  return tags.some(tag => list.includes(tag));
+}
 function buildSupabasePayload(st, eventType){
   const logs = st && Array.isArray(st.answerLogs) ? st.answerLogs : [];
   const flags = st && st.flags ? st.flags : {};
@@ -8492,8 +8501,8 @@ function buildSupabasePayload(st, eventType){
     final_ending_type: st.finalEndingType || '',
     route_key: st.routeKey || '',
     relationship_route: st.relationshipRoute || (flags.marriedBranch ? '已婚/家庭线' : (flags.soloBranch ? '独处/搭子线' : '未记录')),
-    child_route: st.childRoute || (hasAnyTag(st, ['有娃计划','育儿线','孩子兴趣']) ? '有子女/育儿线' : '未明确'),
-    parenting_route: st.parentingRoute || (hasAnyTag(st, ['控制型家长','尊重兴趣','育儿线']) ? '已进入育儿议题' : '未记录'),
+    child_route: st.childRoute || (hasAnyTagForSync(st, ['有娃计划','育儿线','孩子兴趣']) ? '有子女/育儿线' : '未明确'),
+parenting_route: st.parentingRoute || (hasAnyTagForSync(st, ['控制型家长','尊重兴趣','育儿线']) ? '已进入育儿议题' : '未记录'),
     illegal_count: flags.illegalChoiceCount || st.illegalCount || 0,
     grey_count: flags.everGrey ? Math.max(st.greyCount || 0, 1) : (st.greyCount || 0),
     stats: safeClone(st.stats, {}),
