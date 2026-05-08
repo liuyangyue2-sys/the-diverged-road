@@ -77,16 +77,19 @@
 /* ====== Supabase 固定配置：已填好你的 URL 和 Publishable key ====== */
 const SUPABASE_URL = "https://gprhouosljuonstjopct.supabase.co";
 const SUPABASE_KEY = "sb_publishable_jGgEqtk9vGVkjTe5fhf2KA_uPXcOMRL";
-const APP_VERSION = "upload_ready_auto_cloud_v6";
+const APP_VERSION = "upload_ready_dual_write_v7";
+const LATEST_TABLES = ["loti_sessions_latest_v7", "sessions_latest"];
+const EVENT_TABLES = ["loti_session_events_v7", "session_events"];
+let lastCloudError = "";
 
 /* ====== 基础数据 ====== */
 const STORAGE_CURRENT = "loti_upload_ready_current_v1";
 const STORAGE_ARCHIVE = "loti_upload_ready_archive_v1";
 const STORAGE_UNLOCKED = "loti_upload_ready_unlocked_v1";
 const CLIENT_ID_KEY = "loti_client_id_upload_ready_v1";
-const QUEUE_KEY = "loti_supabase_queue_upload_ready_auto_cloud_v6";
-const MIGRATE_DONE_KEY = "loti_old_local_storage_migrated_upload_ready_auto_cloud_v6";
-const ARCHIVE_SYNC_MARK_KEY = "loti_archive_synced_marks_upload_ready_auto_cloud_v6";
+const QUEUE_KEY = "loti_supabase_queue_upload_ready_dual_write_v7";
+const MIGRATE_DONE_KEY = "loti_old_local_storage_migrated_upload_ready_dual_write_v7";
+const ARCHIVE_SYNC_MARK_KEY = "loti_archive_synced_marks_upload_ready_dual_write_v7";
 
 let screen = "home";
 let state = null;
@@ -543,29 +546,47 @@ async function supabaseFetch(path, options){
 }
 async function runJob(job){
   if(!ensureSupabase()) return {ok:false,message:"Supabase not ready"};
-  try{
-    if(job.kind==="event"){
-      await supabaseFetch("/rest/v1/loti_session_events_v6", {
-        method:"POST",
-        headers:{"Prefer":"return=minimal"},
-        body: job.row
-      });
-      return {ok:true};
+
+  const errors = [];
+
+  if(job.kind==="event"){
+    for(const table of EVENT_TABLES){
+      try{
+        await supabaseFetch("/rest/v1/" + table, {
+          method:"POST",
+          headers:{"Prefer":"return=minimal"},
+          body: job.row
+        });
+        return {ok:true, table};
+      }catch(error){
+        const msg = error && error.message ? error.message : String(error);
+        if(msg.includes("duplicate") || msg.includes("23505")) return {ok:true, table, duplicate:true};
+        errors.push(table + ": " + msg);
+      }
     }
-    if(job.kind==="latest"){
-      await supabaseFetch("/rest/v1/loti_sessions_latest_v6?on_conflict=session_id", {
-        method:"POST",
-        headers:{"Prefer":"resolution=merge-duplicates,return=minimal"},
-        body: job.row
-      });
-      return {ok:true};
-    }
-    return {ok:true};
-  }catch(error){
-    const msg = error && error.message ? error.message : String(error);
-    if(msg.includes("duplicate") || msg.includes("23505")) return {ok:true};
-    return {ok:false,message:msg,status:error.status,data:error.data};
+    lastCloudError = errors.join("；");
+    return {ok:false,message:lastCloudError};
   }
+
+  if(job.kind==="latest"){
+    for(const table of LATEST_TABLES){
+      try{
+        await supabaseFetch("/rest/v1/" + table + "?on_conflict=session_id", {
+          method:"POST",
+          headers:{"Prefer":"resolution=merge-duplicates,return=minimal"},
+          body: job.row
+        });
+        return {ok:true, table};
+      }catch(error){
+        const msg = error && error.message ? error.message : String(error);
+        errors.push(table + ": " + msg);
+      }
+    }
+    lastCloudError = errors.join("；");
+    return {ok:false,message:lastCloudError};
+  }
+
+  return {ok:true};
 }
 async function flushSupabaseQueue(){
   if(flushing) return false;
@@ -579,7 +600,7 @@ async function flushSupabaseQueue(){
       if(!res.ok){ remain.push(job); console.warn("[cloud sync failed]", res, job); }
     }
     saveQueue(remain);
-    cloudStatus = remain.length ? `云同步部分失败，待补传 ${remain.length} 条` : "云同步成功";
+    cloudStatus = remain.length ? `云同步部分失败，待补传 ${remain.length} 条｜${lastCloudError || ""}` : "云同步成功";
     return remain.length===0;
   }finally{ flushing = false; }
 }
@@ -986,23 +1007,44 @@ async function loadCloudAdminData(){
     return;
   }
   try{
-    /* loadCloudAdminData_sync_v5 */
     await syncAllLocalRecordsToCloud(false);
     await flushSupabaseQueue();
+
     const select = "session_id,client_id,event_type,source,app_version,answer_count,final_ending_id,final_ending_name,final_ending_type,route_key,relationship_route,child_route,parenting_route,illegal_count,grey_count,stats,answer_logs,raw,user_agent,page_url,started_at,finished_at,updated_at";
-    const data = await supabaseFetch("/rest/v1/loti_sessions_latest_v6?select=" + encodeURIComponent(select) + "&order=updated_at.desc&limit=10000", {
-      method:"GET",
-      token: adminAccessToken
+    let all = [];
+    let readErrors = [];
+
+    for(const table of LATEST_TABLES){
+      try{
+        const data = await supabaseFetch("/rest/v1/" + table + "?select=" + encodeURIComponent(select) + "&order=updated_at.desc&limit=10000", {
+          method:"GET",
+          token: adminAccessToken
+        });
+        (data || []).forEach(r => all.push(Object.assign({_fromTable: table}, r)));
+      }catch(error){
+        readErrors.push(table + ": " + (error.message || error));
+      }
+    }
+
+    const map = new Map();
+    all.forEach(r => {
+      const key = r.session_id || (r.client_id + "_" + r.updated_at);
+      const old = map.get(key);
+      if(!old || String(r.updated_at || "") > String(old.updated_at || "")) map.set(key, r);
     });
-    cloudSessions = (data || []).map(r => Object.assign({}, r.raw || {}, {
+
+    const rows = Array.from(map.values()).sort((a,b)=>String(b.updated_at||"").localeCompare(String(a.updated_at||"")));
+
+    cloudSessions = rows.map(r => Object.assign({}, r.raw || {}, {
       sessionId:r.session_id,clientId:r.client_id,answerCount:r.answer_count,finalEndingId:r.final_ending_id,finalEndingName:r.final_ending_name,
       finalEndingType:r.final_ending_type,routeKey:r.route_key,relationshipRoute:r.relationship_route,childRoute:r.child_route,parentingRoute:r.parenting_route,
-      illegalCount:r.illegal_count,greyCount:r.grey_count,stats:r.stats || {},answerLogs:r.answer_logs || [],updatedAt:r.updated_at,pageUrl:r.page_url
+      illegalCount:r.illegal_count,greyCount:r.grey_count,stats:r.stats || {},answerLogs:r.answer_logs || [],updatedAt:r.updated_at,pageUrl:r.page_url,fromTable:r._fromTable
     }));
-    cloudStatus = "已读取云端记录：" + cloudSessions.length + " 条。";
+
+    cloudStatus = "已读取云端记录：" + cloudSessions.length + " 条。" + (readErrors.length ? " 部分读取失败：" + readErrors.join("；") : "");
     render();
   }catch(error){
-    alert("读取失败：" + (error.message || error) + "。请确认 SQL 已执行，且邮箱已加入 admin_users。");
+    alert("读取失败：" + (error.message || error));
   }
 }
 function summarizeCloud(){
@@ -1061,7 +1103,7 @@ function renderHome(app){
       <div class="mini"><b>路线分流</b><span>专业、升学、就业、家庭、创业、底线选择都会影响问题和结局。</span></div>
       <div class="mini"><b>后台统计</b><span>管理员可查看结局分布、违法比例、选择记录并导出。</span></div>
     </div>
-    <div class="cloud">云状态：${htmlEscape(cloudStatus)}｜待补传：${readQueue().length}｜client：${htmlEscape(getClientId().slice(0,22))}</div>
+    <div class="cloud">云状态：${htmlEscape(cloudStatus)}｜待补传：${readQueue().length}｜client：${htmlEscape(getClientId().slice(0,22))}${lastCloudError ? "｜错误：" + htmlEscape(lastCloudError.slice(0,120)) : ""}</div>
   </section>`;
 }
 function renderPanel(){
@@ -1070,7 +1112,7 @@ function renderPanel(){
     <div class="pill">第 ${state.answerCount+1 > 32 ? 32 : state.answerCount+1} / 32 题</div>
     ${STATS.map(([k,n])=>`<div class="stat"><div class="statTop"><span>${n}</span><b>${state.stats[k]}</b></div><div class="bar"><i style="width:${state.stats[k]}%"></i></div></div>`).join("")}
     <p class="muted">专业：${state.major || "未定"}<br>路径：${state.path || "未定"}<br>职业：${state.career || "未定"}<br>违法：${state.illegalCount || 0}｜灰色：${state.greyCount || 0}</p>
-    <div class="cloud">云状态：${htmlEscape(cloudStatus)}｜待补传：${readQueue().length}｜client：${htmlEscape(getClientId().slice(0,22))}</div>
+    <div class="cloud">云状态：${htmlEscape(cloudStatus)}｜待补传：${readQueue().length}｜client：${htmlEscape(getClientId().slice(0,22))}${lastCloudError ? "｜错误：" + htmlEscape(lastCloudError.slice(0,120)) : ""}</div>
   </div>`;
 }
 function renderGame(app){
@@ -1132,7 +1174,7 @@ function renderAdmin(app){
     <p class="muted">先在 Supabase Authentication 创建管理员邮箱，再把邮箱写入 admin_users。普通用户只能上传，不能读取。</p>
     <div class="grid"><input id="adminEmail" placeholder="管理员邮箱"><input id="adminPassword" type="password" placeholder="管理员密码"></div>
     <div class="actions"><button onclick="adminLoginSupabase()">登录并读取</button><button class="ghost" onclick="loadCloudAdminData()">刷新</button><button class="ghost" onclick="exportCloudJSON()">导出 JSON</button><button class="ghost" onclick="exportCloudWord()">导出 Word</button></div>
-    <p class="cloud">云状态：${htmlEscape(cloudStatus)}</p>
+    <p class="cloud">云状态：${htmlEscape(cloudStatus)}｜待补传：${readQueue().length}${lastCloudError ? "｜错误：" + htmlEscape(lastCloudError.slice(0,160)) : ""}</p>
   </div>
   <div class="adminMetrics">
     <div class="metric">总记录<b>${sum.total}</b></div>
@@ -1155,7 +1197,18 @@ window.LOTI_AUTO_SYNC_TIMER_V6 = window.LOTI_AUTO_SYNC_TIMER_V6 || setInterval((
 }, 8000);
 
 window.addEventListener("online", ()=>flushSupabaseQueue().catch(console.warn));
-document.addEventListener("visibilitychange", ()=>{ if(document.visibilityState==="hidden") flushSupabaseQueue().catch(()=>{}); });
+document.addEventListener("visibilitychange", ()=>{
+  if(document.visibilityState==="hidden"){
+    try{ syncAllLocalRecordsToCloud(false).catch(console.warn); }catch(e){}
+    flushSupabaseQueue().catch(()=>{});
+  }
+});
+window.LOTI_V7_BEFORE_UNLOAD = true;
+window.addEventListener("beforeunload", ()=>{
+  try{
+    if(state) syncStateToSupabase(state, state.finalEndingId ? "auto_leave_finish" : "auto_leave_progress");
+  }catch(e){}
+});
 function boot(){
   try{
     forceCloudBootstrap();
