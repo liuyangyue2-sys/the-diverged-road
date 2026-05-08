@@ -83,12 +83,12 @@ module.exports = {
   "T05": {
     "name": "创业梭哈",
     "delta": {
-      "wealth": -7,
-      "health": -5,
-      "mission": 1,
-      "relationship": -3
+      "wealth": -6,
+      "health": -3,
+      "mission": 2,
+      "relationship": -2
     },
-    "bonusProbability": 0.25,
+    "bonusProbability": 0.28,
     "bonusDelta": {
       "wealth": 12,
       "mission": 3
@@ -110,8 +110,8 @@ module.exports = {
     "name": "闷头深挖",
     "delta": {
       "wealth": 0,
-      "health": -4,
-      "mission": 1,
+      "health": -3,
+      "mission": 2,
       "relationship": -1
     },
     "feedback": "你扎进问题本身了。热闹没你的份，硬本事可能有。"
@@ -129,10 +129,10 @@ module.exports = {
   "T09": {
     "name": "做点人事",
     "delta": {
-      "wealth": -2,
-      "health": -2,
-      "mission": 1,
-      "relationship": 1
+      "wealth": -1,
+      "health": -1,
+      "mission": 2,
+      "relationship": 2
     },
     "feedback": "你顺手给世界加了点功德。工资没怎么长，人味确实回来了。"
   },
@@ -164,10 +164,10 @@ module.exports = {
   "T12": {
     "name": "回乡硬干",
     "delta": {
-      "wealth": 0,
+      "wealth": 1,
       "health": 1,
-      "mission": 1,
-      "relationship": 1
+      "mission": 2,
+      "relationship": 2
     },
     "feedback": "你不是退场，是去了更缺人的地图。"
   },
@@ -208,10 +208,10 @@ module.exports = {
   "T16": {
     "name": "底线模式",
     "delta": {
-      "wealth": -1,
-      "health": 0,
-      "mission": 1,
-      "relationship": -1
+      "wealth": 0,
+      "health": 1,
+      "mission": 2,
+      "relationship": 0
     },
     "feedback": "你守住了底线。现实不会立刻给奖杯，但以后照镜子不用闪避。"
   },
@@ -219,11 +219,11 @@ module.exports = {
     "name": "过劳冲塔",
     "delta": {
       "wealth": 3,
-      "health": -7,
-      "mission": 0,
-      "relationship": -3
+      "health": -5,
+      "mission": 1,
+      "relationship": -2
     },
-    "bonusProbability": 0.12,
+    "bonusProbability": 0.16,
     "bonusDelta": {
       "wealth": 6
     },
@@ -8438,7 +8438,7 @@ const CLOUD_HTTP_BASE='https://636c-cloud1-d0geyskxbd94d1619-1423728045.tcb.qclo
 // 只放 anon / publishable key，不要放 service_role key。
 const SUPABASE_CONFIG_KEY = 'loti_supabase_config_v4_forced';
 const DEFAULT_SUPABASE_URL = 'https://gprhouosljuonstjopct.supabase.co'; // 强制云同步：所有用户默认写入这个 Supabase 项目
-const DEFAULT_SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImdwcmhvdW9zbGp1b25zdGpvcGN0Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzgxMzgwMjEsImV4cCI6MjA5MzcxNDAyMX0.-o9C1kQduoy5Ru8e6Wlx38b20DGhWoXky1QoRTMMH_E'; // 只能填 anon / publishable key，不要填 service_role
+const DEFAULT_SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImdwcmhvdW9zbGp1b25zdGpvcGN0Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzgxMzgwMjEsImV4cCI6MjA5MzcxNDAyMX0.-o9C1kQduoy5Ru8e6Wlx38b20DGhWoXky1QoRTMMH_E'; // legacy anon JWT，最稳；只能放 anon，不要放 service_role
 let SUPABASE_URL = DEFAULT_SUPABASE_URL;
 let SUPABASE_ANON_KEY = DEFAULT_SUPABASE_ANON_KEY;
 let SUPABASE_ENABLED = false;
@@ -8895,6 +8895,7 @@ async function backfillLocalToCloud(){
   render();
 }
 // 进入页面后自动调用：不弹窗、不阻塞，遇到没传过的旧局就静默上云。
+// 同时把"正在进行中的当前局"也直接 upsert，保证刷新页面也不会丢进度。
 async function autoBackfillOnce(){
   // SDK 没就绪先等：有些 CDN 慢/失败，留出最多 8 秒让备用 CDN 加载完
   if(!sb || !SUPABASE_ENABLED){
@@ -8904,9 +8905,23 @@ async function autoBackfillOnce(){
     }
   }
   if(!refreshSupabaseClient() || !sb) return;
-  const list = getSessions();
-  if(!list.length) return;
+
   let ok = 0, fail = 0, dirty = false;
+
+  // 1) 先把"当前进行中的局"也尝试同步一次（之前只有结局后才同步）
+  try {
+    const cur = loadCurrent();
+    if(cur && (cur.sessionId || cur.answerCount > 0 || (cur.answerLogs||[]).length > 0)){
+      if(!cur.sessionId){ cur.sessionId = 'session_' + Date.now() + '_' + Math.random().toString(36).slice(2,8); saveCurrent(); }
+      const event = cur.isFinished ? 'finish' : 'resume';
+      const synced = await syncStateToSupabase(cur, event);
+      if(synced) ok++;
+      else fail++;
+    }
+  } catch(e){ console.warn('[auto-backfill] current state sync failed:', e); }
+
+  // 2) 扫所有已经结局的本地历史，没传过的统统传一次
+  const list = getSessions();
   for(let i=0;i<list.length;i++){
     const st = list[i];
     if(!st || !st.finalEndingId) continue;
@@ -8922,7 +8937,10 @@ async function autoBackfillOnce(){
   if(dirty) setSessions(list);
   if(ok || fail) console.log('[auto-backfill] ok=' + ok + ' fail=' + fail);
   if(ok){
-    cloudStatus = '已自动补传 ' + ok + ' 条历史数据到云端' + (fail ? '（失败 ' + fail + '）' : '') + '。';
+    cloudStatus = '已自动上云 ' + ok + ' 条数据' + (fail ? '（失败 ' + fail + '）' : '') + '。';
+    if(currentView === 'admin'){ try { render(); } catch(e){} }
+  } else if(fail){
+    cloudStatus = '云同步全部失败：' + fail + ' 条。请点云同步诊断查原因。';
     if(currentView === 'admin'){ try { render(); } catch(e){} }
   }
 }
@@ -8980,8 +8998,8 @@ function flushUnsyncedKeepalive(){
 }
 window.onload=()=>{
   render();
-  // 1) 首次进入：延迟 1.5s 启动后台自动补传，避免抢占首屏
-  setTimeout(()=>{ autoBackfillOnce().catch(e=>console.warn('[auto-backfill] top-level error:', e)); }, 1500);
+  // 1) 首次进入：立刻触发一次自动上云（包括当前进行中的局 + 所有未传的历史局）
+  autoBackfillOnce().catch(e=>console.warn('[auto-backfill] top-level error:', e));
   // 2) 周期性重扫：每 2 分钟重试一次失败的同步，自愈
   setInterval(()=>{ autoBackfillOnce().catch(e=>console.warn('[auto-backfill] interval error:', e)); }, 120000);
   // 3) 网络刚恢复时立刻重试
