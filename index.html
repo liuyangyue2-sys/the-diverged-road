@@ -12,7 +12,25 @@
 <body>
   <div class="wrap" id="app"></div>
   <div id="lightbox" onclick="closePreview()"><img id="lightboxImg" alt="preview"></div>
-  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <script>
+  // 多 CDN 兜底加载 supabase-js：任意一个 CDN 通就行，避免单点故障导致云同步失效。
+  (function(){
+    var sources = [
+      'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.min.js',
+      'https://unpkg.com/@supabase/supabase-js@2.45.4/dist/umd/supabase.min.js',
+      'https://cdn.bootcdn.net/ajax/libs/supabase-js/2.45.4/supabase.min.js'
+    ];
+    function load(i){
+      if(i >= sources.length || (window.supabase && window.supabase.createClient)) return;
+      var s = document.createElement('script');
+      s.src = sources[i]; s.async = false;
+      s.onload = function(){ console.log('[supabase] SDK ready via', sources[i]); };
+      s.onerror = function(){ console.warn('[supabase] CDN failed:', sources[i]); load(i+1); };
+      document.head.appendChild(s);
+    }
+    load(0);
+  })();
+  </script>
   <script>
 const modules = {};
 modules["../data/optionPresets"] = function(module, exports, require) {
@@ -8420,7 +8438,7 @@ const CLOUD_HTTP_BASE='https://636c-cloud1-d0geyskxbd94d1619-1423728045.tcb.qclo
 // 只放 anon / publishable key，不要放 service_role key。
 const SUPABASE_CONFIG_KEY = 'loti_supabase_config_v4_forced';
 const DEFAULT_SUPABASE_URL = 'https://gprhouosljuonstjopct.supabase.co'; // 强制云同步：所有用户默认写入这个 Supabase 项目
-const DEFAULT_SUPABASE_ANON_KEY = 'sb_publishable_jGgEqtk9vGVkjTe5fhf2KA_uPXcOMRL'; // 只能填 anon / publishable key，不要填 service_role
+const DEFAULT_SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImdwcmhvdW9zbGp1b25zdGpvcGN0Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzgxMzgwMjEsImV4cCI6MjA5MzcxNDAyMX0.-o9C1kQduoy5Ru8e6Wlx38b20DGhWoXky1QoRTMMH_E'; // 只能填 anon / publishable key，不要填 service_role
 let SUPABASE_URL = DEFAULT_SUPABASE_URL;
 let SUPABASE_ANON_KEY = DEFAULT_SUPABASE_ANON_KEY;
 let SUPABASE_ENABLED = false;
@@ -8461,14 +8479,46 @@ function getSessions(){ try{return JSON.parse(localStorage.getItem(STORE_SESSION
 function setSessions(list){localStorage.setItem(STORE_SESSIONS, JSON.stringify(list||[]));}
 function getUnlocked(){ try{return JSON.parse(localStorage.getItem(STORE_UNLOCKED)||'[]')}catch(e){return []} }
 function unlock(id){ const s=new Set(getUnlocked()); s.add(id); localStorage.setItem(STORE_UNLOCKED, JSON.stringify([...s]));}
-function finishSession(st){
+async function finishSession(st){
   if(!st || !st.finalEndingId) return;
   unlock(st.finalEndingId);
   const list=getSessions().filter(x=>x.sessionId!==st.sessionId);
   list.unshift(JSON.parse(JSON.stringify(st)));
   setSessions(list.slice(0,300));
   saveCurrent();
-  syncStateToSupabase(st, 'finish');
+  // 1) 用 keepalive fetch 兜底：即使玩家立即关页面也能把结局送到 Supabase
+  try { syncFinishViaBeacon(st); } catch(e){ console.warn('keepalive backup failed:', e); }
+  // 2) 正式 await 一次走 SDK 的 upsert，等同步成功再返回
+  let synced = false;
+  try { synced = await syncStateToSupabase(st, 'finish'); } catch(e){ console.warn('finish sync error:', e); }
+  if(synced) markSessionSynced(st.sessionId);
+}
+function markSessionSynced(sessionId){
+  if(!sessionId) return;
+  const list = getSessions();
+  let changed = false;
+  for(const s of list){
+    if(s && s.sessionId === sessionId && !s.cloudSynced){
+      s.cloudSynced = true;
+      s.cloudSyncedAt = Date.now();
+      changed = true;
+    }
+  }
+  if(changed) setSessions(list);
+}
+function syncFinishViaBeacon(st){
+  if(!SUPABASE_ENABLED || !SUPABASE_URL || !SUPABASE_ANON_KEY) return;
+  const payload = buildSupabasePayload(st, 'finish');
+  const url = SUPABASE_URL.replace(/\/$/,'') + '/rest/v1/sessions_latest?on_conflict=session_id';
+  const headers = {
+    'apikey': SUPABASE_ANON_KEY,
+    'Authorization': 'Bearer ' + SUPABASE_ANON_KEY,
+    'Content-Type': 'application/json',
+    'Prefer': 'resolution=merge-duplicates,return=minimal'
+  };
+  // keepalive:true 让请求在页面卸载之后还能继续完成
+  fetch(url, { method:'POST', headers, body: JSON.stringify(payload), keepalive: true })
+    .catch(err => console.warn('keepalive fetch failed:', err));
 }
 function cloudToUrl(src){
   if(!src) return '';
@@ -8814,19 +8864,138 @@ function renderAdmin(){
     <div class="cards"><div class="mini"><b>云端参与局数</b><span>${cloudSessions.length}</span></div><div class="mini"><b>云端违法用户数</b><span>${cloudA.illegalUsers}</span></div><div class="mini"><b>云端违法选择占比</b><span>${cloudA.answers?Math.round(cloudA.illegalChoices/cloudA.answers*1000)/10:0}%</span></div></div>
     <div class="admin-grid"><table><caption>云端结局分布</caption>${mapTable(cloudA.ending)}</table><table><caption>云端婚恋路径</caption>${mapTable(cloudA.romance)}</table><table><caption>云端子女选择</caption>${mapTable(cloudA.child)}</table></div>
     <h2>云端最近记录</h2><table><caption>最近 20 局</caption><tr><td>结局</td><td>路线</td><td>婚恋</td><td>子女</td><td>题数</td></tr>${recentRows}</table>
-    <div class="actions"><button onclick="exportCloudData()">导出云端 JSON</button><button onclick="exportData()">导出本地 JSON</button><label class="upload">导入本地 JSON<input type="file" accept="application/json" onchange="importData(event)"></label></div>
+    <div class="actions"><button onclick="exportCloudData()">导出云端 JSON</button><button onclick="exportData()">导出本地 JSON</button><label class="upload">导入本地 JSON<input type="file" accept="application/json" onchange="importData(event)"></label><button onclick="backfillLocalToCloud()">本地历史补传到云</button><button onclick="diagnoseCloudSync()">云同步诊断</button></div>
     <h2>本地备份数据</h2>
     <div class="admin-grid"><table><caption>本地结局分布</caption>${mapTable(localA.ending)}</table><table><caption>本地婚恋路径</caption>${mapTable(localA.romance)}</table><table><caption>本地子女选择</caption>${mapTable(localA.child)}</table></div>
   </section>`
 }
 function exportData(){const blob=new Blob([JSON.stringify(getSessions(),null,2)],{type:'application/json'}); const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download='life_algo_sessions.json'; a.click();}
 function importData(ev){const f=ev.target.files[0]; if(!f)return; const r=new FileReader(); r.onload=()=>{try{setSessions(JSON.parse(r.result)); alert('导入成功'); render()}catch(e){alert('JSON格式错误')}}; r.readAsText(f);}
+async function backfillLocalToCloud(){
+  if(!refreshSupabaseClient() || !sb){ alert('Supabase 未配置或 SDK 未加载，无法补传。'); return; }
+  const list = getSessions();
+  if(!list.length){ alert('本地没有可补传的历史局。'); return; }
+  if(!confirm('准备把 ' + list.length + ' 条本地历史局补传到云端。\n相同 sessionId 的云端记录会被覆盖，确认继续？')) return;
+  let ok = 0, fail = 0, dirty = false;
+  for(let i=0;i<list.length;i++){
+    const st = list[i];
+    if(!st || !st.finalEndingId) { continue; }
+    if(!st.sessionId){ st.sessionId = 'legacy_' + i + '_' + Date.now() + '_' + Math.random().toString(36).slice(2,8); dirty = true; }
+    try {
+      const payload = buildSupabasePayload(st, 'backfill');
+      const { error } = await sb.from('sessions_latest').upsert(payload, { onConflict: 'session_id' });
+      if(error){ fail++; console.warn('补传失败：', st.sessionId, error.message); }
+      else { ok++; st.cloudSynced = true; st.cloudSyncedAt = Date.now(); dirty = true; }
+    } catch(err){ fail++; console.warn('补传异常：', err); }
+  }
+  if(dirty) setSessions(list);
+  cloudStatus = '本地补传完成：成功 ' + ok + '，失败 ' + fail + '。';
+  alert(cloudStatus);
+  if(cloudAdminLogged){ try { await loadCloudAdminData(); } catch(e){ console.warn(e); } }
+  render();
+}
+// 进入页面后自动调用：不弹窗、不阻塞，遇到没传过的旧局就静默上云。
+async function autoBackfillOnce(){
+  // SDK 没就绪先等：有些 CDN 慢/失败，留出最多 8 秒让备用 CDN 加载完
+  if(!sb || !SUPABASE_ENABLED){
+    for(let i=0;i<16;i++){
+      if(refreshSupabaseClient() && sb) break;
+      await new Promise(r=>setTimeout(r, 500));
+    }
+  }
+  if(!refreshSupabaseClient() || !sb) return;
+  const list = getSessions();
+  if(!list.length) return;
+  let ok = 0, fail = 0, dirty = false;
+  for(let i=0;i<list.length;i++){
+    const st = list[i];
+    if(!st || !st.finalEndingId) continue;
+    if(st.cloudSynced) continue;
+    if(!st.sessionId){ st.sessionId = 'legacy_' + i + '_' + Date.now() + '_' + Math.random().toString(36).slice(2,8); dirty = true; }
+    try {
+      const payload = buildSupabasePayload(st, 'auto_backfill');
+      const { error } = await sb.from('sessions_latest').upsert(payload, { onConflict: 'session_id' });
+      if(error){ fail++; console.warn('[auto-backfill] failed:', st.sessionId, error.message); }
+      else { ok++; st.cloudSynced = true; st.cloudSyncedAt = Date.now(); dirty = true; }
+    } catch(err){ fail++; console.warn('[auto-backfill] exception:', err); }
+  }
+  if(dirty) setSessions(list);
+  if(ok || fail) console.log('[auto-backfill] ok=' + ok + ' fail=' + fail);
+  if(ok){
+    cloudStatus = '已自动补传 ' + ok + ' 条历史数据到云端' + (fail ? '（失败 ' + fail + '）' : '') + '。';
+    if(currentView === 'admin'){ try { render(); } catch(e){} }
+  }
+}
 function render(){
   const app=$('app');
   const map={home:renderHome,game:renderGame,result:()=>renderResult(state),gallery:renderGallery,archive:renderArchive,admin:renderAdmin};
   app.innerHTML=(map[currentView]||renderHome)();
 }
-window.onload=()=>{render();}
+async function diagnoseCloudSync(){
+  const lines = [];
+  lines.push('—— 云同步诊断 ——');
+  lines.push('SDK 加载: ' + (window.supabase && window.supabase.createClient ? '✅' : '❌（CDN 没拉到 supabase-js）'));
+  lines.push('Project URL: ' + (SUPABASE_URL || '空'));
+  lines.push('Key 长度: ' + (SUPABASE_ANON_KEY ? SUPABASE_ANON_KEY.length : 0) + '（前缀: ' + (SUPABASE_ANON_KEY||'').slice(0,12) + '…）');
+  lines.push('SUPABASE_ENABLED: ' + (SUPABASE_ENABLED ? '✅' : '❌'));
+  const localList = getSessions();
+  const finished = localList.filter(s=>s && s.finalEndingId);
+  const synced = finished.filter(s=>s.cloudSynced);
+  lines.push('本地总局数: ' + localList.length + '，已结局: ' + finished.length + '，已上云: ' + synced.length);
+
+  if(refreshSupabaseClient() && sb){
+    // 写入测试
+    try {
+      const probeId = 'diag_' + Date.now();
+      const { error: wErr } = await sb.from('sessions_latest').upsert({
+        session_id: probeId, client_id: 'diagnose', event_type: 'diagnose', raw: { diag: true }
+      }, { onConflict: 'session_id' });
+      lines.push('匿名写入测试: ' + (wErr ? '❌ ' + wErr.message : '✅'));
+    } catch(e){ lines.push('匿名写入测试: ❌ ' + (e.message||e)); }
+    // 管理员读取测试
+    try {
+      const { data: authData } = await sb.auth.getUser();
+      if(authData && authData.user){
+        const { data, error } = await sb.from('sessions_latest').select('session_id').limit(1);
+        lines.push('管理员读取测试: ' + (error ? '❌ ' + error.message + '（多半是 admin_users 没注册你的 UID）' : '✅ 能读到 ' + (data?data.length:0) + ' 行'));
+      } else {
+        lines.push('管理员读取测试: ⚠ 当前未登录管理员，跳过');
+      }
+    } catch(e){ lines.push('管理员读取测试: ❌ ' + (e.message||e)); }
+  } else {
+    lines.push('客户端没初始化成功，跳过网络测试。');
+  }
+  alert(lines.join('\n'));
+  console.log(lines.join('\n'));
+}
+function flushUnsyncedKeepalive(){
+  // 关页面前的最后兜底：把所有 finalEndingId 存在但 cloudSynced 不为 true 的本地局，用 keepalive fetch 直接 POST 到 Supabase。
+  try {
+    if(!SUPABASE_ENABLED) return;
+    const list = getSessions();
+    for(const st of (list||[])){
+      if(st && st.finalEndingId && !st.cloudSynced){
+        try { syncFinishViaBeacon(st); } catch(e){ /* ignore */ }
+      }
+    }
+  } catch(e){ /* ignore */ }
+}
+window.onload=()=>{
+  render();
+  // 1) 首次进入：延迟 1.5s 启动后台自动补传，避免抢占首屏
+  setTimeout(()=>{ autoBackfillOnce().catch(e=>console.warn('[auto-backfill] top-level error:', e)); }, 1500);
+  // 2) 周期性重扫：每 2 分钟重试一次失败的同步，自愈
+  setInterval(()=>{ autoBackfillOnce().catch(e=>console.warn('[auto-backfill] interval error:', e)); }, 120000);
+  // 3) 网络刚恢复时立刻重试
+  window.addEventListener('online', ()=>{ autoBackfillOnce().catch(e=>console.warn(e)); });
+  // 4) 标签页重新可见时也重试（用户切回来）
+  document.addEventListener('visibilitychange', ()=>{
+    if(document.visibilityState === 'visible'){ autoBackfillOnce().catch(e=>console.warn(e)); }
+  });
+  // 5) 关页面/切走前最后一次兜底刷新
+  window.addEventListener('beforeunload', flushUnsyncedKeepalive);
+  window.addEventListener('pagehide', flushUnsyncedKeepalive);
+}
 </script>
 </body>
 </html>
