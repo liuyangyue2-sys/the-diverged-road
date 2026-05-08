@@ -77,15 +77,15 @@
 /* ====== Supabase 固定配置：已填好你的 URL 和 Publishable key ====== */
 const SUPABASE_URL = "https://gprhouosljuonstjopct.supabase.co";
 const SUPABASE_KEY = "sb_publishable_jGgEqtk9vGVkjTe5fhf2KA_uPXcOMRL";
-const APP_VERSION = "upload_ready_no_cdn_v2";
+const APP_VERSION = "upload_ready_hide_delta_debug_v4";
 
 /* ====== 基础数据 ====== */
 const STORAGE_CURRENT = "loti_upload_ready_current_v1";
 const STORAGE_ARCHIVE = "loti_upload_ready_archive_v1";
 const STORAGE_UNLOCKED = "loti_upload_ready_unlocked_v1";
 const CLIENT_ID_KEY = "loti_client_id_upload_ready_v1";
-const QUEUE_KEY = "loti_supabase_queue_upload_ready_v1";
-const MIGRATE_DONE_KEY = "loti_old_local_storage_migrated_upload_ready_v1";
+const QUEUE_KEY = "loti_supabase_queue_upload_ready_v4";
+const MIGRATE_DONE_KEY = "loti_old_local_storage_migrated_upload_ready_v4";
 
 let screen = "home";
 let state = null;
@@ -95,6 +95,7 @@ let cloudStatus = "云同步未初始化";
 let sb = null;
 let adminAccessToken = "";
 let flushing = false;
+let memoryQueue = [];
 
 const STATS = [
   ["wealth","财富"],
@@ -440,8 +441,8 @@ function buildPayload(st, eventType, rawOverride){
     illegal_count: s.illegalCount || 0,
     grey_count: s.greyCount || 0,
     stats: s.stats || {},
-    answer_logs: logs,
-    raw: rawOverride || s,
+    answer_logs: Array.isArray(logs) ? logs.slice(-40) : [],
+    raw: shrinkValueForStorage(rawOverride || s, 5000),
     user_agent: navigator.userAgent,
     page_url: location.href,
     started_at: isoMaybe(s.startedAt),
@@ -449,9 +450,67 @@ function buildPayload(st, eventType, rawOverride){
     updated_at: new Date().toISOString()
   };
 }
-function readQueue(){ try{return JSON.parse(localStorage.getItem(QUEUE_KEY)||"[]")}catch(e){return []} }
-function saveQueue(q){ localStorage.setItem(QUEUE_KEY, JSON.stringify(Array.isArray(q)?q:[])); }
-function enqueue(job){ const q = readQueue(); q.push(job); saveQueue(q.slice(-1200)); }
+function shrinkValueForStorage(value, maxLen){
+  if(value === null || value === undefined) return value;
+  if(typeof value === "string"){
+    return value.length > maxLen ? value.slice(0, maxLen) + "……[已截断，避免浏览器本地缓存爆仓]" : value;
+  }
+  if(Array.isArray(value)){
+    return value.slice(-40).map(x => shrinkValueForStorage(x, Math.max(500, Math.floor(maxLen / 4))));
+  }
+  if(typeof value === "object"){
+    const out = {};
+    for(const [k,v] of Object.entries(value)){
+      if(k === "local_storage_raw" || k === "rawMigratedLocalStorage"){
+        out[k] = "[已省略原始大缓存，避免 localStorage quota exceeded；可通过已解析 session 与 manifest 追踪]";
+      }else if(k === "answerLogs" || k === "answer_logs"){
+        out[k] = Array.isArray(v) ? v.slice(-40) : v;
+      }else{
+        out[k] = shrinkValueForStorage(v, Math.max(500, Math.floor(maxLen / 3)));
+      }
+    }
+    return out;
+  }
+  return value;
+}
+function shrinkJob(job){
+  const j = JSON.parse(JSON.stringify(job || {}));
+  if(j.row){
+    if(j.row.raw) j.row.raw = shrinkValueForStorage(j.row.raw, 3000);
+    if(j.row.answer_logs) j.row.answer_logs = Array.isArray(j.row.answer_logs) ? j.row.answer_logs.slice(-40) : [];
+  }
+  return j;
+}
+function readQueue(){
+  let disk = [];
+  try{ disk = JSON.parse(localStorage.getItem(QUEUE_KEY)||"[]"); }catch(e){ disk = []; }
+  if(!Array.isArray(disk)) disk = [];
+  return disk.concat(memoryQueue || []);
+}
+function saveQueue(q){
+  const arr = Array.isArray(q) ? q.slice(-300) : [];
+  memoryQueue = [];
+  try{
+    localStorage.setItem(QUEUE_KEY, JSON.stringify(arr));
+    return true;
+  }catch(e1){
+    const small = arr.map(shrinkJob).slice(-120);
+    try{
+      localStorage.setItem(QUEUE_KEY, JSON.stringify(small));
+      return true;
+    }catch(e2){
+      // 浏览器本地缓存已经满了：不再让页面白屏，临时放内存队列，页面仍可继续玩。
+      memoryQueue = small;
+      console.warn("[cloud queue fallback to memory]", e2);
+      return false;
+    }
+  }
+}
+function enqueue(job){
+  const q = readQueue();
+  q.push(shrinkJob(job));
+  saveQueue(q);
+}
 async function supabaseFetch(path, options){
   const headers = Object.assign({
     "apikey": SUPABASE_KEY,
@@ -528,34 +587,120 @@ function syncStateToSupabase(st, eventType){
     return true;
   }catch(e){ console.warn("syncStateToSupabase error", e); return false; }
 }
+
+function manualCloudTest(){
+  const testState = state || {
+    sessionId:id("manual_test"),
+    startedAt:Date.now(),
+    answerCount:0,
+    stats:{wealth:50,health:50,mission:50,relationship:50},
+    answerLogs:[]
+  };
+  syncStateToSupabase(testState, "manual_test");
+  setTimeout(async ()=>{
+    await flushSupabaseQueue();
+    alert("已发送云同步测试。请去 Supabase 的 session_events 表查看 event_type = manual_test，client_id = " + getClientId());
+  }, 500);
+}
 function migrateOldLocalDataOnce(){
   if(localStorage.getItem(MIGRATE_DONE_KEY)==="1") return;
-  const raw = {};
+
+  const manifest = [];
+  const parsedSessions = [];
   const words = ["session","sessions","current","state","answer","answers","result","ending","life","loti","人生","选择","结局"];
+
   for(let i=0;i<localStorage.length;i++){
     const k = localStorage.key(i);
     if(!k) continue;
-    if(words.some(w => k.toLowerCase().includes(String(w).toLowerCase()))){
-      try{ raw[k] = localStorage.getItem(k); }catch(e){}
-    }
+    if(k === QUEUE_KEY) continue;
+    if(k.includes("supabase_queue")) continue;
+
+    const lower = k.toLowerCase();
+    if(!words.some(w => lower.includes(String(w).toLowerCase()))) continue;
+
+    let v = "";
+    try{ v = localStorage.getItem(k) || ""; }catch(e){ v = ""; }
+
+    manifest.push({
+      key:k,
+      size:v.length,
+      preview:v.slice(0, 500)
+    });
+
+    try{
+      const parsed = JSON.parse(v);
+      if(Array.isArray(parsed)){
+        parsed.forEach(item => {
+          if(item && typeof item === "object" && (item.sessionId || item.answerLogs || item.stats || item.finalEndingId)){
+            parsedSessions.push(item);
+          }
+        });
+      }else if(parsed && typeof parsed === "object"){
+        if(Array.isArray(parsed.sessions)){
+          parsed.sessions.forEach(item => {
+            if(item && typeof item === "object") parsedSessions.push(item);
+          });
+        }else if(parsed.sessionId || parsed.answerLogs || parsed.stats || parsed.finalEndingId){
+          parsedSessions.push(parsed);
+        }
+      }
+    }catch(e){}
   }
-  const keys = Object.keys(raw);
-  if(keys.length){
-    const temp = {sessionId:id("migrate_raw"), startedAt:Date.now(), answerCount:0, stats:{}, answerLogs:[]};
-    const payload = buildPayload(temp, "migrate_raw_local_storage", {migrated_at:new Date().toISOString(), local_storage_keys:keys, local_storage_raw:raw});
+
+  // 能解析成 session 的旧数据，逐条补传；不会把整个 localStorage 原文塞进队列。
+  const seen = new Set();
+  parsedSessions.slice(-80).forEach((old, idx) => {
+    const sid = old.sessionId || old.session_id || ("migrated_" + idx + "_" + Date.now());
+    if(seen.has(sid)) return;
+    seen.add(sid);
+    old.sessionId = sid;
+    syncStateToSupabase(old, old.finalEndingId ? "migrate_finished_session" : "migrate_session");
+  });
+
+  // 未解析部分只上传 manifest，避免再次触发 quota exceeded。
+  if(manifest.length){
+    const temp = {sessionId:id("migrate_manifest"), startedAt:Date.now(), answerCount:parsedSessions.length, stats:{}, answerLogs:[]};
+    const payload = buildPayload(temp, "migrate_local_storage_manifest", {
+      migrated_at:new Date().toISOString(),
+      parsed_session_count: parsedSessions.length,
+      local_storage_manifest: manifest
+    });
     const ev = Object.assign({}, payload, {client_event_id:payload.last_event_id, created_at:new Date().toISOString()});
     delete ev.last_event_id; delete ev.started_at; delete ev.finished_at; delete ev.updated_at;
     enqueue({kind:"event", row:ev});
     enqueue({kind:"latest", row:payload});
   }
-  localStorage.setItem(MIGRATE_DONE_KEY, "1");
+
+  try{ localStorage.setItem(MIGRATE_DONE_KEY, "1"); }catch(e){}
+}
+function clearOldCloudQueues(){
+  // 清理前几个版本留下的巨大同步队列，否则浏览器会一直 quota exceeded。
+  const keys = [
+    "loti_supabase_queue_upload_ready_v1",
+    "loti_supabase_queue_upload_ready_v2",
+    "loti_supabase_queue_final_v1",
+    "loti_supabase_sync_queue_final_v1",
+    "loti_supabase_sync_queue_v3"
+  ];
+  keys.forEach(k => { try{ localStorage.removeItem(k); }catch(e){} });
 }
 function forceCloudBootstrap(){
+  clearOldCloudQueues();
   ensureSupabase();
   getClientId();
   migrateOldLocalDataOnce();
   const s = loadCurrent();
-  if(s && !s.finalEndingId) syncStateToSupabase(s, "resume");
+  if(s && !s.finalEndingId){
+    syncStateToSupabase(s, "resume");
+  }else{
+    syncStateToSupabase({
+      sessionId:id("boot"),
+      startedAt:Date.now(),
+      answerCount:0,
+      stats:{wealth:50,health:50,mission:50,relationship:50},
+      answerLogs:[]
+    }, "start");
+  }
   flushSupabaseQueue().catch(console.warn);
 }
 
@@ -825,6 +970,7 @@ function renderHome(app){
       <button onclick="newGame()">开始新人生</button>
       <button class="ghost" onclick="continueGame()" ${has?"":"disabled"}>继续本地进度</button>
       ${navButtons()}
+      <button class="ghost" onclick="manualCloudTest()">测试云同步</button>
     </div>
     <div class="cards">
       <div class="mini"><b>强制云同步</b><span>每次开始、选择、结局都会写入 Supabase；失败进入本地队列。</span></div>
@@ -832,7 +978,7 @@ function renderHome(app){
       <div class="mini"><b>路线分流</b><span>专业、升学、就业、家庭、创业、底线选择都会影响问题和结局。</span></div>
       <div class="mini"><b>后台统计</b><span>管理员可查看结局分布、违法比例、选择记录并导出。</span></div>
     </div>
-    <div class="cloud">云状态：${htmlEscape(cloudStatus)}｜待补传：${readQueue().length}</div>
+    <div class="cloud">云状态：${htmlEscape(cloudStatus)}｜待补传：${readQueue().length}｜client：${htmlEscape(getClientId().slice(0,22))}</div>
   </section>`;
 }
 function renderPanel(){
@@ -841,7 +987,7 @@ function renderPanel(){
     <div class="pill">第 ${state.answerCount+1 > 32 ? 32 : state.answerCount+1} / 32 题</div>
     ${STATS.map(([k,n])=>`<div class="stat"><div class="statTop"><span>${n}</span><b>${state.stats[k]}</b></div><div class="bar"><i style="width:${state.stats[k]}%"></i></div></div>`).join("")}
     <p class="muted">专业：${state.major || "未定"}<br>路径：${state.path || "未定"}<br>职业：${state.career || "未定"}<br>违法：${state.illegalCount || 0}｜灰色：${state.greyCount || 0}</p>
-    <div class="cloud">云状态：${htmlEscape(cloudStatus)}｜待补传：${readQueue().length}</div>
+    <div class="cloud">云状态：${htmlEscape(cloudStatus)}｜待补传：${readQueue().length}｜client：${htmlEscape(getClientId().slice(0,22))}</div>
   </div>`;
 }
 function renderGame(app){
@@ -855,7 +1001,7 @@ function renderGame(app){
       <span class="pill">${qn.id}</span>
       <h2>${htmlEscape(qn.title)}</h2>
       <p class="prompt">${htmlEscape(qn.prompt)}</p>
-      <div class="options">${qn.options.map(op=>`<button class="option" onclick="chooseOption('${op.key}')"><span class="label">${op.key}</span><div><b>${htmlEscape(op.text)}</b><p>${deltaText(op.delta)}${op.illegal?"｜高危违法":op.grey?"｜灰色擦边":""}</p></div></button>`).join("")}</div>
+      <div class="options">${qn.options.map(op=>`<button class="option" onclick="chooseOption('${op.key}')"><span class="label">${op.key}</span><div><b>${htmlEscape(op.text)}</b></div></button>`).join("")}</div>
       ${lastFeedback ? `<div class="feedback">${htmlEscape(lastFeedback)}</div>` : ""}
     </div>
   </div>`;
