@@ -4,7 +4,6 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>人生算法：抉择之书｜强制云同步直传版</title>
-  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
   <style>
     :root{
       --bg:#07111f;--card:#111a2f;--card2:#17213d;--text:#f8fafc;--muted:#a8b3cf;
@@ -78,7 +77,7 @@
 /* ====== Supabase 固定配置：已填好你的 URL 和 Publishable key ====== */
 const SUPABASE_URL = "https://gprhouosljuonstjopct.supabase.co";
 const SUPABASE_KEY = "sb_publishable_jGgEqtk9vGVkjTe5fhf2KA_uPXcOMRL";
-const APP_VERSION = "upload_ready_full_v1";
+const APP_VERSION = "upload_ready_no_cdn_v2";
 
 /* ====== 基础数据 ====== */
 const STORAGE_CURRENT = "loti_upload_ready_current_v1";
@@ -94,6 +93,7 @@ let lastFeedback = "";
 let cloudSessions = [];
 let cloudStatus = "云同步未初始化";
 let sb = null;
+let adminAccessToken = "";
 let flushing = false;
 
 const STATS = [
@@ -410,13 +410,8 @@ function getClientId(){
   return v;
 }
 function ensureSupabase(){
-  if(!window.supabase){ cloudStatus = "Supabase CDN 未加载"; return false; }
-  if(!sb){
-    sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY, {
-      auth:{persistSession:true,autoRefreshToken:true,detectSessionInUrl:false}
-    });
-  }
-  cloudStatus = "云同步已强制开启";
+  // v2：不再依赖 jsDelivr / supabase-js CDN，避免 CDN 加载失败导致整页空白。
+  cloudStatus = "云同步已强制开启（无 CDN 直连 Supabase REST）";
   return true;
 }
 function isoMaybe(v){
@@ -457,20 +452,54 @@ function buildPayload(st, eventType, rawOverride){
 function readQueue(){ try{return JSON.parse(localStorage.getItem(QUEUE_KEY)||"[]")}catch(e){return []} }
 function saveQueue(q){ localStorage.setItem(QUEUE_KEY, JSON.stringify(Array.isArray(q)?q:[])); }
 function enqueue(job){ const q = readQueue(); q.push(job); saveQueue(q.slice(-1200)); }
+async function supabaseFetch(path, options){
+  const headers = Object.assign({
+    "apikey": SUPABASE_KEY,
+    "Authorization": "Bearer " + (options && options.token ? options.token : SUPABASE_KEY),
+    "Content-Type": "application/json"
+  }, (options && options.headers) || {});
+  const res = await fetch(SUPABASE_URL + path, {
+    method: (options && options.method) || "GET",
+    headers,
+    body: options && options.body ? JSON.stringify(options.body) : undefined
+  });
+  const text = await res.text();
+  let data = null;
+  try { data = text ? JSON.parse(text) : null; } catch(e) { data = text; }
+  if(!res.ok){
+    const msg = (data && (data.message || data.error_description || data.error)) || text || ("HTTP " + res.status);
+    const err = new Error(msg);
+    err.status = res.status;
+    err.data = data;
+    throw err;
+  }
+  return data;
+}
 async function runJob(job){
-  if(!ensureSupabase() || !sb) return {ok:false,message:"Supabase not ready"};
-  if(job.kind==="event"){
-    const {error} = await sb.from("session_events").insert(job.row);
-    if(error && error.code==="23505") return {ok:true};
-    if(error) return {ok:false,message:error.message,code:error.code};
+  if(!ensureSupabase()) return {ok:false,message:"Supabase not ready"};
+  try{
+    if(job.kind==="event"){
+      await supabaseFetch("/rest/v1/session_events", {
+        method:"POST",
+        headers:{"Prefer":"return=minimal"},
+        body: job.row
+      });
+      return {ok:true};
+    }
+    if(job.kind==="latest"){
+      await supabaseFetch("/rest/v1/sessions_latest?on_conflict=session_id", {
+        method:"POST",
+        headers:{"Prefer":"resolution=merge-duplicates,return=minimal"},
+        body: job.row
+      });
+      return {ok:true};
+    }
     return {ok:true};
+  }catch(error){
+    const msg = error && error.message ? error.message : String(error);
+    if(msg.includes("duplicate") || msg.includes("23505")) return {ok:true};
+    return {ok:false,message:msg,status:error.status,data:error.data};
   }
-  if(job.kind==="latest"){
-    const {error} = await sb.from("sessions_latest").upsert(job.row, {onConflict:"session_id"});
-    if(error) return {ok:false,message:error.message,code:error.code};
-    return {ok:true};
-  }
-  return {ok:true};
 }
 async function flushSupabaseQueue(){
   if(flushing) return false;
@@ -704,29 +733,48 @@ async function adminLoginSupabase(){
   const email = ($("adminEmail")?.value || "").trim();
   const password = ($("adminPassword")?.value || "").trim();
   if(!email || !password){ alert("请输入管理员邮箱和密码。"); return; }
-  const {error} = await sb.auth.signInWithPassword({email,password});
-  if(error){ alert("登录失败：" + error.message); return; }
-  await loadCloudAdminData();
+  try{
+    const data = await supabaseFetch("/auth/v1/token?grant_type=password", {
+      method:"POST",
+      headers:{"Authorization":"Bearer " + SUPABASE_KEY},
+      body:{email,password}
+    });
+    adminAccessToken = data && data.access_token ? data.access_token : "";
+    if(!adminAccessToken) throw new Error("没有拿到 access_token，请检查邮箱密码。");
+    cloudStatus = "管理员登录成功。";
+    await loadCloudAdminData();
+  }catch(error){
+    alert("登录失败：" + (error.message || error));
+  }
 }
 async function adminLogoutSupabase(){
-  if(sb) await sb.auth.signOut();
+  adminAccessToken = "";
   cloudSessions = [];
+  cloudStatus = "已退出云后台。";
   render();
 }
 async function loadCloudAdminData(){
   if(!ensureSupabase()) return;
-  const {data:userData} = await sb.auth.getUser();
-  if(!userData || !userData.user){ alert("请先登录管理员账号。"); return; }
-  const {data,error} = await sb.from("sessions_latest")
-    .select("session_id,client_id,event_type,source,app_version,answer_count,final_ending_id,final_ending_name,final_ending_type,route_key,relationship_route,child_route,parenting_route,illegal_count,grey_count,stats,answer_logs,raw,user_agent,page_url,started_at,finished_at,updated_at")
-    .order("updated_at",{ascending:false}).limit(10000);
-  if(error){ alert("读取失败：" + error.message + "。请确认 SQL 已执行，且邮箱已加入 admin_users。"); return; }
-  cloudSessions = (data || []).map(r => Object.assign({}, r.raw || {}, {
-    sessionId:r.session_id,clientId:r.client_id,answerCount:r.answer_count,finalEndingId:r.final_ending_id,finalEndingName:r.final_ending_name,
-    finalEndingType:r.final_ending_type,routeKey:r.route_key,relationshipRoute:r.relationship_route,childRoute:r.child_route,parentingRoute:r.parenting_route,
-    illegalCount:r.illegal_count,greyCount:r.grey_count,stats:r.stats || {},answerLogs:r.answer_logs || [],updatedAt:r.updated_at,pageUrl:r.page_url
-  }));
-  render();
+  if(!adminAccessToken){
+    alert("请先登录管理员账号。");
+    return;
+  }
+  try{
+    const select = "session_id,client_id,event_type,source,app_version,answer_count,final_ending_id,final_ending_name,final_ending_type,route_key,relationship_route,child_route,parenting_route,illegal_count,grey_count,stats,answer_logs,raw,user_agent,page_url,started_at,finished_at,updated_at";
+    const data = await supabaseFetch("/rest/v1/sessions_latest?select=" + encodeURIComponent(select) + "&order=updated_at.desc&limit=10000", {
+      method:"GET",
+      token: adminAccessToken
+    });
+    cloudSessions = (data || []).map(r => Object.assign({}, r.raw || {}, {
+      sessionId:r.session_id,clientId:r.client_id,answerCount:r.answer_count,finalEndingId:r.final_ending_id,finalEndingName:r.final_ending_name,
+      finalEndingType:r.final_ending_type,routeKey:r.route_key,relationshipRoute:r.relationship_route,childRoute:r.child_route,parentingRoute:r.parenting_route,
+      illegalCount:r.illegal_count,greyCount:r.grey_count,stats:r.stats || {},answerLogs:r.answer_logs || [],updatedAt:r.updated_at,pageUrl:r.page_url
+    }));
+    cloudStatus = "已读取云端记录：" + cloudSessions.length + " 条。";
+    render();
+  }catch(error){
+    alert("读取失败：" + (error.message || error) + "。请确认 SQL 已执行，且邮箱已加入 admin_users。");
+  }
 }
 function summarizeCloud(){
   const s = {total:cloudSessions.length,completed:0,illegalSessions:0,endingCount:{}};
@@ -872,11 +920,21 @@ function closePreview(){ $("lightbox").classList.remove("active"); }
 /* ====== 启动 ====== */
 window.addEventListener("online", ()=>flushSupabaseQueue().catch(console.warn));
 document.addEventListener("visibilitychange", ()=>{ if(document.visibilityState==="hidden") flushSupabaseQueue().catch(()=>{}); });
-window.onload = function(){
-  forceCloudBootstrap();
-  state = loadCurrent();
-  render();
-};
+function boot(){
+  try{
+    forceCloudBootstrap();
+    state = loadCurrent();
+    render();
+  }catch(error){
+    console.error(error);
+    const app = document.getElementById("app");
+    if(app){
+      app.innerHTML = `<div class="wrap"><div class="card"><h1>页面脚本报错</h1><p>错误信息：${htmlEscape(error.message || error)}</p><button onclick="localStorage.clear();location.reload()">清空本地缓存并重载</button></div></div>`;
+    }
+  }
+}
+window.onload = boot;
+document.addEventListener("DOMContentLoaded", () => setTimeout(boot, 0));
 </script>
 </body>
 </html>
