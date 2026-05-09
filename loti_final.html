@@ -8638,9 +8638,9 @@ async function loadCloudAdminData(){
   // v5: 不再要求 Supabase Auth 登录，直接用 anon key 读云端数据
   const { data, error } = await sb
     .from('sessions_latest')
-    .select('session_id,client_id,event_type,answer_count,final_ending_id,final_ending_name,final_ending_type,route_key,relationship_route,child_route,parenting_route,illegal_count,grey_count,stats,answer_logs,raw,updated_at')
+    .select('session_id,client_id,event_type,answer_count,final_ending_id,final_ending_name,final_ending_type,route_key,relationship_route,child_route,parenting_route,illegal_count,grey_count,stats,updated_at')
     .order('updated_at', { ascending:false })
-    .limit(1000);
+    .limit(500);
   if(error){
     cloudStatus = '读取云端数据失败：' + error.message + '。请确认已执行新版 supabase_setup.sql。';
     alert(cloudStatus);
