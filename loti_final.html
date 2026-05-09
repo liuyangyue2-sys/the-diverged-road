@@ -8634,9 +8634,8 @@ async function adminLogoutSupabase(){
   render();
 }
 async function loadCloudAdminData(){
-  if(!refreshSupabaseClient() || !sb){ alert('Supabase 未配置。'); return; }
-  const { data: authData } = await sb.auth.getUser();
-  if(!authData || !authData.user){ alert('请先登录 Supabase 管理员账号。'); return; }
+  if(!refreshSupabaseClient() || !sb){ console.warn('Supabase 未配置。'); return; }
+  // v5: 不再要求 Supabase Auth 登录，直接用 anon key 读云端数据
   const { data, error } = await sb
     .from('sessions_latest')
     .select('session_id,client_id,event_type,answer_count,final_ending_id,final_ending_name,final_ending_type,route_key,relationship_route,child_route,parenting_route,illegal_count,grey_count,stats,answer_logs,raw,updated_at')
@@ -8844,7 +8843,7 @@ function buildAnalytics(list){
 }
 function mapTable(obj){return Object.entries(obj).sort((a,b)=>b[1]-a[1]).map(([k,v])=>`<tr><td>${escapeHtml(k)}</td><td>${v}</td></tr>`).join('')}
 function renderAdmin(){
-  if(!admin){return `<section class="card admin-login"><h2>管理员入口</h2><p>输入本地管理员口令后，可查看本地统计；配置 Supabase 后还能查看所有玩家云端数据。</p><input id="adminCode" placeholder="管理员口令"><button onclick="if($('adminCode').value==='${ADMIN_CODE}'){admin=true; render()}else alert('口令错误')">进入</button></section>`}
+  if(!admin){return `<section class="card admin-login"><h2>管理员入口</h2><p>输入本地管理员口令后，可查看本地统计；配置 Supabase 后还能查看所有玩家云端数据。</p><input id="adminCode" placeholder="管理员口令"><button onclick="if($('adminCode').value==='${ADMIN_CODE}'){admin=true; loadCloudAdminData().catch(e=>console.warn(e)); render()}else alert('口令错误')">进入</button></section>`}
   const cfg=getSupabaseConfig();
   const localList=getSessions(); const localA=buildAnalytics(localList);
   const cloudA=buildAnalytics(cloudSessions);
@@ -8857,9 +8856,7 @@ function renderAdmin(){
       <input id="supabaseUrl" readonly placeholder="Supabase Project URL" value="${escapeHtml(cfg.url || '')}">
       <input id="supabaseAnonKey" readonly placeholder="Supabase anon / publishable key" value="${escapeHtml(cfg.anonKey || '')}">
       <div class="actions"><button onclick="saveSupabaseSettings()">保存 Supabase 配置</button><button class="ghost" onclick="clearSupabaseSettings()">清空配置</button></div>
-      <input id="adminEmail" placeholder="Supabase 管理员邮箱" autocomplete="username">
-      <input id="adminPassword" placeholder="Supabase 管理员密码" type="password" autocomplete="current-password">
-      <div class="actions"><button onclick="adminLoginSupabase()">登录并读取云端数据</button><button class="ghost" onclick="loadCloudAdminData()">刷新云端数据</button><button class="ghost" onclick="adminLogoutSupabase()">退出云后台</button></div>
+      <div class="actions"><button onclick="loadCloudAdminData()">刷新云端数据</button></div>
     </div>
     <div class="cards"><div class="mini"><b>云端参与局数</b><span>${cloudSessions.length}</span></div><div class="mini"><b>云端违法用户数</b><span>${cloudA.illegalUsers}</span></div><div class="mini"><b>云端违法选择占比</b><span>${cloudA.answers?Math.round(cloudA.illegalChoices/cloudA.answers*1000)/10:0}%</span></div></div>
     <div class="admin-grid"><table><caption>云端结局分布</caption>${mapTable(cloudA.ending)}</table><table><caption>云端婚恋路径</caption>${mapTable(cloudA.romance)}</table><table><caption>云端子女选择</caption>${mapTable(cloudA.child)}</table></div>
@@ -8990,28 +8987,4 @@ function flushUnsyncedKeepalive(){
     if(!SUPABASE_ENABLED) return;
     const list = getSessions();
     for(const st of (list||[])){
-      if(st && st.finalEndingId && !st.cloudSynced){
-        try { syncFinishViaBeacon(st); } catch(e){ /* ignore */ }
-      }
-    }
-  } catch(e){ /* ignore */ }
-}
-window.onload=()=>{
-  render();
-  // 1) 首次进入：立刻触发一次自动上云（包括当前进行中的局 + 所有未传的历史局）
-  autoBackfillOnce().catch(e=>console.warn('[auto-backfill] top-level error:', e));
-  // 2) 周期性重扫：每 2 分钟重试一次失败的同步，自愈
-  setInterval(()=>{ autoBackfillOnce().catch(e=>console.warn('[auto-backfill] interval error:', e)); }, 120000);
-  // 3) 网络刚恢复时立刻重试
-  window.addEventListener('online', ()=>{ autoBackfillOnce().catch(e=>console.warn(e)); });
-  // 4) 标签页重新可见时也重试（用户切回来）
-  document.addEventListener('visibilitychange', ()=>{
-    if(document.visibilityState === 'visible'){ autoBackfillOnce().catch(e=>console.warn(e)); }
-  });
-  // 5) 关页面/切走前最后一次兜底刷新
-  window.addEventListener('beforeunload', flushUnsyncedKeepalive);
-  window.addEventListener('pagehide', flushUnsyncedKeepalive);
-}
-</script>
-</body>
-</html>
+      if(st && st.finalEndingId && !st.cloudSynced
