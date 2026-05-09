@@ -8987,4 +8987,28 @@ function flushUnsyncedKeepalive(){
     if(!SUPABASE_ENABLED) return;
     const list = getSessions();
     for(const st of (list||[])){
-      if(st && st.finalEndingId && !st.cloudSynced
+      if(st && st.finalEndingId && !st.cloudSynced) {
+        try { syncFinishViaBeacon(st); } catch(e){ /* ignore */ }
+      }
+    }
+  } catch(e){ /* ignore */ }
+}
+window.onload=()=>{
+  render();
+  // 1) 首次进入：立刻触发一次自动上云（包括当前进行中的局 + 所有未传的历史局）
+  autoBackfillOnce().catch(e=>console.warn('[auto-backfill] top-level error:', e));
+  // 2) 周期性重扫：每 2 分钟重试一次失败的同步，自愈
+  setInterval(()=>{ autoBackfillOnce().catch(e=>console.warn('[auto-backfill] interval error:', e)); }, 120000);
+  // 3) 网络刚恢复时立刻重试
+  window.addEventListener('online', ()=>{ autoBackfillOnce().catch(e=>console.warn(e)); });
+  // 4) 标签页重新可见时也重试（用户切回来）
+  document.addEventListener('visibilitychange', ()=>{
+    if(document.visibilityState === 'visible'){ autoBackfillOnce().catch(e=>console.warn(e)); }
+  });
+  // 5) 关页面/切走前最后一次兜底刷新
+  window.addEventListener('beforeunload', flushUnsyncedKeepalive);
+  window.addEventListener('pagehide', flushUnsyncedKeepalive);
+}
+</script>
+</body>
+</html>
